@@ -1,7 +1,8 @@
 from flask import Flask, jsonify
+from decouple import config
 
 app = Flask(__name__)
-PORT = 5000
+PORT = config('PORT')
 
 
 @app.route('/', methods=['GET'])
