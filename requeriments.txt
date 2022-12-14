@@ -1,7 +1,0 @@
-Flask
-TA-Lib
-python-binance
-pandas
-mplfinance
-numpy
-requests
