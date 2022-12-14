@@ -1,5 +1,4 @@
-from flask import Flask, jsonify, request
-from enum import Enum
+from flask import Flask, jsonify
 
 app = Flask(__name__)
 
