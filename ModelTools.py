@@ -11,7 +11,7 @@ from talib import MA_Type
 import requests
 
 from binance import Client, ThreadedWebsocketManager
-from binance.enums import *
+from binance.enums import HistoricalKlinesType
 import websockets
 
 api_key = 'dIXuGb6b1CFjGb6nqn7Vyav7cKm0JwVSv3al62rBruM82Xmsjq4t4tMcNbFoYFsr'
@@ -2930,11 +2930,15 @@ class ModelTools:
     def get_dmi_marker_by_date(self, d: int):
         mr = None
         five_min = 300000
+        mlt = 50
+        if self.interval == Client.KLINE_INTERVAL_1HOUR:
+            five_min = 3600000
+            mlt = 10
 
         self.momentums.reverse()
 
         for item in self.momentums:
-            if 0 <= d - item['DI']['date'] <= five_min * 50:
+            if 0 <= d - item['DI']['date'] <= five_min * mlt:
                 mr = item
                 break
 
@@ -3860,7 +3864,7 @@ class ModelTools:
             if len(entries[1]) == index:
                 continue
 
-            if value['value'] / item['value'] >= 0.9994:
+            if value['value'] > item['value']:
 
                 if len(values) < 1:
                     values.append({
@@ -3875,7 +3879,7 @@ class ModelTools:
                         'data': [item, value],
                         'type': 0
                     })
-            elif value['value'] / item['value'] <= 1.0006:
+            elif value['value'] < item['value']:
 
                 if len(values) < 1:
                     values.append({

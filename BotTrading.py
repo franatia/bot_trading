@@ -1,23 +1,26 @@
-import binance.enums
-import numpy
+import json
+import urllib.parse
 
-from ModelTools import ModelTools
+import numpy
 import datetime
 from binance import Client
 from binance import AsyncClient, BinanceSocketManager
 import pandas as pd
 import mplfinance as mplf
+from BotData import BotData
+from pymongo import MongoClient
+from MongoDB import MongoDB
+import time
 
+MONGO_STRING = 'mongodb+srv://admin_1:aa74b6474add49868a695bcc3155e426@cluster0.umgwskd.mongodb.net/test?authSource=admin&replicaSet=atlas-qw1msu-shard-0&readPreference=primary&appname=MongoDB%20Compass&ssl=true'
+mongo_db = MongoDB(MONGO_STRING)
 
-class BotTrading:
+class BotTrading(BotData):
     def __init__(self, currency: str, start_day: str or int, end_day: str or int, interval, strategy: int,
                  usd_test: float, leverage: int, user_key: str, secret_key: str, first_period_ema, second_period_ema):
-        self.currency = currency
-        self.start_day = start_day
-        self.end_day = end_day
-        self.interval = interval
+        super().__init__(currency, start_day, end_day, interval, user_key, secret_key, first_period_ema,
+                         second_period_ema)
         self.strategy = strategy
-        self.binance_client = Client(user_key, secret_key)
 
         self.usd_test = usd_test
         self.leverage = leverage
@@ -26,20 +29,6 @@ class BotTrading:
 
         self.client_socket: AsyncClient = None
         self.bm: BinanceSocketManager = None
-
-        self.first_period_ema = first_period_ema
-        self.second_period_ema = second_period_ema
-
-        self.model_tools = ModelTools(self.currency, self.start_day, self.end_day, interval=interval,
-                                      first_period_ema=first_period_ema, second_period_ema=second_period_ema)
-        self.klines = self.model_tools.klines
-        self.first_ema, self.second_ema = self.model_tools.first_ema, self.model_tools.second_ema
-        self.rsi = self.model_tools.rsi
-        self.dmi = self.model_tools.dmi
-        self.dmi_markers = self.model_tools.momentums
-        self.last_close_price = 1
-        self.markers = self.model_tools.calculateSupportsAndResistors(self.model_tools.klines, 'CLOSE',
-                                                                      downPercentage=.998, climbPercentage=1.002)
 
         self.trade_in_ex = False
         self.trade_data = None
@@ -53,236 +42,34 @@ class BotTrading:
 
         self.rsi_type = None
         self.rsi_item_guide = None
+        self.dmi_item_guide = None
+        self.adx_trade = False
+
+        self.symbol_n_precision = 0
+        self.price = 0
+
+        self.get_n_precision()
+
+    def get_n_precision(self):
+        info = self.binance_client.futures_exchange_info()
+
+        for item in info['symbols']:
+            if item['symbol'] != self.currency:
+                continue
+
+            self.symbol_n_precision = item['quantityPrecision']
+
 
     def run_strategy_test(self):
-        if self.strategy == 1:
-            self.run_strategy_one_test()
-        elif self.strategy == 2:
-            self.run_strategy_two_test()
-        elif self.strategy == 3:
+        if self.strategy == 3:
             self.run_strategy_three_test()
-
-    def run_strategy_one_test(self):
-        # types: 1 (BULL), 0 (BEAR)
-
-        ema_cross_type = None
-        rsi_type = None
-        rsi_diff = 0
-
-        for i in range(int(len(self.klines) * .8), len(self.klines)):
-            kline = self.klines[i]
-            rsi_ = self.rsi[i - 20] if i >= 20 else None
-            ema25_ = self.first_ema[i - self.first_period_ema] if i >= self.first_period_ema else None
-            ema40_ = self.second_ema[i - self.second_period_ema] if i >= self.second_period_ema else None
-
-            if self.trade_in_ex:
-                self.calc_trade(kline)
-
-                if self.trade_in_ex:
-                    ect = self.check_ema_type(ema25_, ema40_)
-                    ema_cross_type = ect
-                    continue
-                rsi_type = None
-                rsi_diff = 0
-
-            if ema25_ is not None and ema40_ is not None:
-
-                ect = self.check_ema_type(ema25_, ema40_)
-
-                if ema_cross_type is None:
-                    ema_cross_type = ect
-
-                if rsi_['rsi'] <= 30 >= rsi_['ma'] and (rsi_type is None or rsi_type == 1):
-                    rsi_type = 0
-                    rsi_diff = 1
-                elif rsi_['rsi'] >= 70 <= rsi_['ma'] and (rsi_type is None or rsi_type == 0):
-                    rsi_type = 1
-                    rsi_diff = 1
-                elif rsi_type == 0 and rsi_diff == 1:
-                    if rsi_['rsi'] > self.rsi[i - 21]['rsi']:
-                        s_ = self.get_next_support(kline, [0.980, 0.990])
-
-                        sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-
-                        tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                        tp = round(tp, 2)
-
-                        self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-
-                        rsi_diff = 0
-                    else:
-                        rsi_diff = 1
-                elif rsi_type == 1 and rsi_diff == 1:
-                    if rsi_['rsi'] < self.rsi[i - 21]['rsi']:
-                        r_ = self.get_next_resistance(kline, [1.020, 1.010])
-
-                        sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-
-                        tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                        tp = round(tp, 2)
-
-                        self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage, kline[6])
-                        rsi_diff = 0
-                    else:
-                        rsi_diff = 1
-                elif ema_cross_type == 0 and ect == 1 and rsi_['rsi'] >= 70.00:
-                    s_ = self.get_next_support(kline, [0.980, 0.990])
-
-                    sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-                    tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                    tp = round(tp, 2)
-
-                    self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-
-                elif ema_cross_type == 1 and ect == 0 and rsi_['rsi'] <= 30.00:
-                    r_ = self.get_next_resistance(kline, [1.020, 1.010])
-
-                    sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-                    tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                    tp = round(tp, 2)
-
-                    self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage, kline[6])
-
-                ema_cross_type = ect
-
-    def run_strategy_two_test(self):
-        rsi_type = None
-        rsi_item_guide = None
-
-        for i in range(int(len(self.klines) * .2), len(self.klines)):
-            kline = self.klines[i]
-            rsi_ = self.rsi[i - 14] if i >= 14 else None
-            dmi_ = self.dmi[i - 28] if i >= 28 else None
-
-            if rsi_ is None or dmi_ is None:
-                continue
-            if rsi_['ma'] == 'nan':
-                continue
-
-            if kline[6] == 1669652699999:
-                print('hola')
-
-            if self.trade_in_ex:
-                self.calc_trade(kline)
-                if self.trade_in_ex:
-                    continue
-                rsi_type = None
-
-            if rsi_['rsi'] >= 70 <= rsi_['ma'] and (
-                    rsi_type is None or rsi_type == 0 or rsi_type == 2 or rsi_type == 3):
-                rsi_type = 1
-                rsi_item_guide = rsi_
-                continue
-            elif rsi_['rsi'] <= 30 >= rsi_['ma'] and (
-                    rsi_type is None or rsi_type == 1 or rsi_type == 3 or rsi_type == 2):
-                rsi_type = 0
-                rsi_item_guide = rsi_
-                continue
-            elif rsi_['rsi'] >= 70 and (rsi_type is None or rsi_type == 3):
-                rsi_type = 2
-                rsi_item_guide = rsi_
-                continue
-            elif rsi_['rsi'] <= 30 and (rsi_type is None or rsi_type == 2):
-                rsi_type = 3
-                rsi_item_guide = rsi_
-                continue
-
-            if rsi_type == 1:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] < rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 28, 'positive'):
-                            r_ = self.get_next_resistance(kline)
-
-                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
-                                                kline[6])
-                    else:
-                        rsi_item_guide = rsi_
-                        continue
-            elif rsi_type == 0:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] > rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 28, 'negative'):
-                            s_ = self.get_next_support(kline)
-
-                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-                            tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-                    else:
-                        rsi_item_guide = rsi_
-                        continue
-            elif rsi_type == 2:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] < rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 29, 'positive') and not (
-                        self.check_dmi_divergence(kline[6], 'positive')) and not (
-                        self.if_di_in_other_trend(kline[6])) and not (self.if_in_liquidate_zone(kline[6])):
-                            s_ = self.get_next_support(kline, [0.995, 0.997])
-
-                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-                            tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-                        elif self.check_dmi_divergence(kline[6], 'positive') or self.if_di_in_other_trend(
-                                kline[6]) or self.if_in_liquidate_zone(kline[6]):
-                            r_ = self.get_next_resistance(kline, [1.003, 1.005])
-
-                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
-                                                kline[6])
-                    elif not (rsi_['ma'] >= 70):
-                        rsi_item_guide = rsi_
-                        continue
-                    else:
-                        rsi_type = 1
-                        rsi_item_guide = rsi_
-
-            elif rsi_type == 3:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] > rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 29, 'negative') and not (
-                        self.check_dmi_divergence(kline[6], 'negative')) and not (
-                        self.if_di_in_other_trend(kline[6])) and not (self.if_in_liquidate_zone(kline[6])):
-                            r_ = self.get_next_resistance(kline, [1.003, 1.005])
-
-                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
-                                                kline[6])
-                        elif self.check_dmi_divergence(kline[6], 'negative') or self.if_di_in_other_trend(
-                                kline[6]) or self.if_in_liquidate_zone(kline[6]):
-                            s_ = self.get_next_support(kline, [0.995, 0.997])
-
-                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-                            tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-
-                    elif not (rsi_['ma'] <= 30):
-                        rsi_item_guide = rsi_
-                        continue
-                    else:
-                        rsi_type = 0
-                        rsi_item_guide = rsi_
 
     def run_strategy_three_test(self):
 
-        rsi_type = None
-        rsi_item_guide = None
-        dmi_item_guide = None
-        adx_trade = False
+        self.rsi_type = None
+        self.rsi_item_guide = None
+        self.dmi_item_guide = None
+        self.adx_trade = False
 
         for i in range(int(len(self.klines) * .2), len(self.klines)):
             kline = self.klines[i]
@@ -298,27 +85,27 @@ class BotTrading:
                 self.calc_trade(kline)
                 if self.trade_in_ex:
                     continue
-                rsi_type = None
+                self.rsi_type = None
 
-            if kline[6] == 1664249699999:
+            if kline[6] == 1671507299999:
                 print('date-call')
 
             if rsi_['rsi'] >= 70 and 60 <= rsi_['ma'] and (
-                    rsi_type is None or rsi_type == 0 or rsi_type == 2 or rsi_type == 3):
-                rsi_type = 1
-                rsi_item_guide = rsi_
-                dmi_item_guide = dmi_
+                    self.rsi_type is None or self.rsi_type == 0 or self.rsi_type == 2 or self.rsi_type == 3):
+                self.rsi_type = 1
+                self.rsi_item_guide = rsi_
+                self.dmi_item_guide = dmi_
                 continue
             elif rsi_['rsi'] <= 30 and 40 >= rsi_['ma'] and (
-                    rsi_type is None or rsi_type == 1 or rsi_type == 3 or rsi_type == 2):
-                rsi_type = 0
-                rsi_item_guide = rsi_
-                dmi_item_guide = dmi_
+                    self.rsi_type is None or self.rsi_type == 1 or self.rsi_type == 3 or self.rsi_type == 2):
+                self.rsi_type = 0
+                self.rsi_item_guide = rsi_
+                self.dmi_item_guide = dmi_
                 continue
 
-            if rsi_type == 1:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide or adx_trade:
-                    if rsi_['rsi'] < rsi_item_guide['rsi'] or adx_trade:
+            if self.rsi_type == 1:
+                if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide or self.adx_trade:
+                    if rsi_['rsi'] < self.rsi_item_guide['rsi'] or self.adx_trade:
                         marker_dmi = self.model_tools.get_dmi_marker_by_date(kline[6])
                         ema_cross = self.model_tools.get_ema_cross_after_by_date(kline[6])
 
@@ -363,11 +150,11 @@ class BotTrading:
 
                                 self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
                                                     kline[6], 'DMI')
-                            elif dmi_['ADX'] > dmi_item_guide['ADX']:
-                                dmi_item_guide = dmi_
-                                adx_trade = True
-                            elif dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
-                                'positive'] < 45 and self.verify_distance_between_ema(1.002, 0.998, kline[6], 1) and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100:
+                            elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                                self.dmi_item_guide = dmi_
+                                self.adx_trade = True
+                            elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                                'positive'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross['type'] == 1:
                                 s_ = self.get_next_support(kline, [0.970, 0.975])
 
                                 sl = round(s_ if s_ is not None else float(kline[4]) * 0.970, 2)
@@ -376,16 +163,16 @@ class BotTrading:
 
                                 self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage,
                                                     kline[6])
-                                adx_trade = False
+                                self.adx_trade = False
                             else:
-                                rsi_type = None
-                                rsi_item_guide = None
-                                adx_trade = False
-                        elif dmi_['ADX'] > dmi_item_guide['ADX']:
-                            dmi_item_guide = dmi_
-                            adx_trade = True
-                        elif dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
-                            'positive'] < 45 and self.verify_distance_between_ema(1.002, 0.998, kline[6], 1) and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100:
+                                self.rsi_type = None
+                                self.rsi_item_guide = None
+                                self.adx_trade = False
+                        elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                            self.dmi_item_guide = dmi_
+                            self.adx_trade = True
+                        elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                            'positive'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross['type'] == 1:
                             s_ = self.get_next_support(kline, [0.970, 0.975])
 
                             sl = round(s_ if s_ is not None else float(kline[4]) * 0.970, 2)
@@ -393,17 +180,17 @@ class BotTrading:
                             tp = round(tp, 2)
 
                             self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-                            adx_trade = False
+                            self.adx_trade = False
                         else:
-                            rsi_type = None
-                            rsi_item_guide = None
-                            adx_trade = False
+                            self.rsi_type = None
+                            self.rsi_item_guide = None
+                            self.adx_trade = False
                     else:
-                        rsi_item_guide = rsi_
+                        self.rsi_item_guide = rsi_
                         continue
-            elif rsi_type == 0:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide or adx_trade:
-                    if rsi_['rsi'] > rsi_item_guide['rsi'] or adx_trade:
+            elif self.rsi_type == 0:
+                if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide or self.adx_trade:
+                    if rsi_['rsi'] > self.rsi_item_guide['rsi'] or self.adx_trade:
                         marker_dmi = self.model_tools.get_dmi_marker_by_date(kline[6])
                         ema_cross = self.model_tools.get_ema_cross_after_by_date(kline[6])
 
@@ -448,11 +235,11 @@ class BotTrading:
 
                                 self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage,
                                                     kline[6], 'DMI')
-                            elif dmi_['ADX'] > dmi_item_guide['ADX']:
-                                dmi_item_guide = dmi_
-                                adx_trade = True
-                            elif dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
-                                'negative'] < 45 and self.verify_distance_between_ema(1.002, 0.998, kline[6], 0) and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100:
+                            elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                                self.dmi_item_guide = dmi_
+                                self.adx_trade = True
+                            elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                                'negative'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross['type'] == 0:
                                 r_ = self.get_next_resistance(kline, [1.030, 1.025])
 
                                 sl = round(r_ if r_ is not None else float(kline[4]) * 1.025, 2)
@@ -462,16 +249,16 @@ class BotTrading:
                                 self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
                                                     kline[6])
 
-                                adx_trade = False
+                                self.adx_trade = False
                             else:
-                                rsi_type = None
-                                rsi_item_guide = None
-                                adx_trade = False
-                        elif dmi_['ADX'] > dmi_item_guide['ADX']:
-                            dmi_item_guide = dmi_
-                            adx_trade = True
-                        elif dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
-                            'negative'] < 45 and self.verify_distance_between_ema(1.002, 0.998, kline[6], 0) and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100:
+                                self.rsi_type = None
+                                self.rsi_item_guide = None
+                                self.adx_trade = False
+                        elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                            self.dmi_item_guide = dmi_
+                            self.adx_trade = True
+                        elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                            'negative'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross['type'] == 0:
                             r_ = self.get_next_resistance(kline, [1.030, 1.025])
 
                             sl = round(r_ if r_ is not None else float(kline[4]) * 1.025, 2)
@@ -481,51 +268,14 @@ class BotTrading:
                             self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
                                                 kline[6])
 
-                            adx_trade = False
+                            self.adx_trade = False
                         else:
-                            rsi_type = None
-                            rsi_item_guide = None
-                            adx_trade = False
+                            self.rsi_type = None
+                            self.rsi_item_guide = None
+                            self.adx_trade = False
                     else:
-                        rsi_item_guide = rsi_
+                        self.rsi_item_guide = rsi_
                         continue
-
-            """
-            
-            elif rsi_type == 2:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] < rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 29, 'positive') and not (self.check_dmi_divergence(kline[6], 'positive')) and not (self.if_di_in_other_trend(kline[6])) and not (self.if_in_liquidate_zone(kline[6])) and self.verify_distance_between_ema(1.002, 0.998, kline[6], 1):
-                            s_ = self.get_next_support(kline, [0.98, 0.99])
-
-                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.99, 2)
-                            tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'LONG', self.usd_test, self.leverage, kline[6])
-                        else:
-                            rsi_type = None
-                            rsi_item_guide = None
-                    else:
-                        rsi_item_guide = rsi_
-
-            elif rsi_type == 3:
-                if self.rsi[self.rsi.index(rsi_) - 1] == rsi_item_guide:
-                    if rsi_['rsi'] > rsi_item_guide['rsi']:
-                        if self.check_dmi_params(50, i - 29, 'negative') and not (self.check_dmi_divergence(kline[6], 'negative')) and not (self.if_di_in_other_trend(kline[6])) and not (self.if_in_liquidate_zone(kline[6])) and self.verify_distance_between_ema(1.002, 0.998, kline[6], 0):
-                            r_ = self.get_next_resistance(kline, [1.02, 1.01])
-
-                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.01, 2)
-                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
-                            tp = round(tp, 2)
-
-                            self.set_trade_data(float(kline[4]), tp, sl, 'SHORT', self.usd_test, self.leverage,
-                                                kline[6])
-                        else:
-                            rsi_type = None
-                            rsi_item_guide = None
-                    else:
-                        rsi_item_guide = rsi_"""
 
     def verify_distance_between_ema(self, bull_percentage, bear_percentage, d: int, t: int):
 
@@ -543,7 +293,7 @@ class BotTrading:
                 break
 
             if f_item['date'] != d or s_item['date'] != d:
-                continue
+                break
 
             if t == 0 and round(f_item['value'] / s_item['value'], 3) <= bear_percentage:
 
@@ -567,7 +317,7 @@ class BotTrading:
             if d_start <= i[6] <= d_end or i[6] == d_end or i[0] == d_start:
                 if kline_ is None:
                     kline_ = i
-                    continue
+                    return
 
                 if t == 0:
 
@@ -591,7 +341,7 @@ class BotTrading:
         for item in klines:
 
             if item == kline_guide or item[6] - kline_guide[6] < 300000 * 4:
-                continue
+                return
 
             if float(item[4]) / float(kline_guide[4]) >= 0.9990 and t == 1:
                 liquidated = True
@@ -767,7 +517,7 @@ class BotTrading:
         for i in dmi_items:
 
             if i == dmi_items[0]:
-                continue
+                return
 
             prc.append(i['DI']['negative'] / dmi_items[0]['DI']['negative'] if t == 0 else i['DI']['positive'] /
                                                                                            dmi_items[0]['DI'][
@@ -795,55 +545,264 @@ class BotTrading:
             return True
 
     def run_strategy(self):
-        if self.strategy == 2:
-            self.run_strategy_two()
+        if self.strategy == 1:
+            self.run_strategy_one()
 
-    def run_strategy_two(self):
+    def check_active_trade(self):
+
+        _t_k = list(self.trade_data.keys())
+
+        _ema_cross = self.model_tools.get_ema_cross_after_by_date(self.klines[len(self.klines) - 1][6])
+
+        _t = self.trade_data[_t_k[0]]
+
+        _k = self.klines[len(self.klines) - 1]
+
+        if _t['positionSide'] == 'LONG':
+
+            if _t['sl_price'] >= float(_k[2]) or _t['sl_price'] >= float(_k[4]) or _t['tp_price'] <= float(_k[3]) or _t['tp_price'] <= float(_k[4]):
+                for _i in self.trade_data:
+                    self.trade_data[_i]['pnl'] = f'-{round((1-1+1-(self.trade_data[_i]["sl_price"] / self.trade_data[_i]["entry"])) * 100, 3)}%' if (_t['sl_price'] >= float(_k[2]) or _t['sl_price'] >= float(_k[4])) else f'+{round(((self.trade_data[_i]["tp_price"] / self.trade_data[_i]["entry"]) - 1) * 100, 3)}%'
+                    self.trade_data[_i]['finish_date'] = _k[6]
+                mongo_db.put_trades(self.trade_data)
+                self.trade_data = None
+                self.trade_in_ex = False
+            elif _ema_cross['type'] == 0 if _t['type'] == 'ADX' else False:
+                for _i in self.trade_data:
+                    _tr = self.trade_data[_i]
+                    _q = round((self.price / _tr['entry']) * _tr['amount'], self.symbol_n_precision)
+                    _tr['client'].futures_create_order(symbol=self.currency, side='SELL', positionSide=_tr['positionSide'], type='MARKET', quantity=_q)
+                    self.trade_data[_i]['pnl'] = f'-{round((1 - 1 + 1 - (self.trade_data[_i]["sl_price"] / self.trade_data[_i]["entry"])) * 100, 3)}%' if (_t['sl_price'] >= float(_k[2]) or _t['sl_price'] >= float(_k[4])) else f'+{round(((self.trade_data[_i]["tp_price"] / self.trade_data[_i]["entry"]) - 1) * 100, 3)}%'
+                    self.trade_data[_i]['finish_date'] = _k[6]
+                mongo_db.put_trades(self.trade_data)
+                self.trade_data = None
+                self.trade_in_ex = False
+
+        elif _t['positionSide'] == 'SHORT':
+            if _t['sl_price'] <= float(_k[3]) or _t['sl_price'] <= float(_k[4]) or _t['tp_price'] >= float(_k[2]) or _t['tp_price'] >= float(_k[4]):
+                for _i in self.trade_data:
+                    self.trade_data[_i]['pnl'] = f'-{round(((self.trade_data[_i]["sl_price"] / self.trade_data[_i]["entry"]) - 1) * 100, 3)}%' if (_t['sl_price'] <= float(_k[3]) or _t['sl_price'] <= float(_k[4])) else f'+{round((1-1+1-(self.trade_data[_i]["tp_price"] / self.trade_data[_i]["entry"])) * 100, 3)}%'
+                    self.trade_data[_i]['finish_date'] = _k[6]
+                mongo_db.put_trades(self.trade_data)
+                self.trade_data = None
+                self.trade_in_ex = False
+            elif _ema_cross['type'] == 1 if _t['type'] == 'ADX' else False:
+                for _i in self.trade_data:
+                    _tr = self.trade_data[_i]
+                    _q = round((1+1-(self.price / _tr['entry'])) * _tr['amount'], self.symbol_n_precision)
+                    _tr['client'].futures_create_order(symbol=self.currency, side='BUY',
+                                                       positionSide=_tr['positionSide'], type='MARKET', quantity=_q)
+                    self.trade_data[_i]['pnl'] = f'-{round(((self.trade_data[_i]["sl_price"] / self.trade_data[_i]["entry"]) - 1) * 100, 3)}%' if (_t['sl_price'] <= float(_k[3]) or _t['sl_price'] <= float(_k[4])) else f'+{round((1 - 1 + 1 - (self.trade_data[_i]["tp_price"] / self.trade_data[_i]["entry"])) * 100, 3)}%'
+                    self.trade_data[_i]['finish_date'] = _k[6]
+                mongo_db.put_trades(self.trade_data)
+                self.trade_data = None
+                self.trade_in_ex = False
+
+
+    def run_strategy_one(self):
+
         kline = self.klines[len(self.klines) - 1]
         rsi_ = self.rsi[len(self.rsi) - 1]
         dmi_ = self.dmi[len(self.dmi) - 1]
 
         if rsi_ is None or dmi_ is None:
             return
+        if rsi_['ma'] == 'nan':
+            return
 
         if self.trade_in_ex:
-            return
+            self.check_active_trade()
+            if self.trade_in_ex:
+                return
             self.rsi_type = None
 
-        if rsi_['rsi'] >= 70 and (self.rsi_type is None or self.rsi_type == 0):
+        if rsi_['rsi'] >= 70 and 60 <= rsi_['ma'] and (
+                self.rsi_type is None or self.rsi_type == 0 or self.rsi_type == 2 or self.rsi_type == 3):
             self.rsi_type = 1
             self.rsi_item_guide = rsi_
+            self.dmi_item_guide = dmi_
             return
-        elif rsi_['rsi'] <= 30 and (self.rsi_type is None or self.rsi_type == 1):
+        elif rsi_['rsi'] <= 30 and 40 >= rsi_['ma'] and (
+                self.rsi_type is None or self.rsi_type == 1 or self.rsi_type == 3 or self.rsi_type == 2):
             self.rsi_type = 0
             self.rsi_item_guide = rsi_
+            self.dmi_item_guide = dmi_
             return
 
         if self.rsi_type == 1:
-            if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide:
-                if rsi_['rsi'] < self.rsi_item_guide['rsi']:
-                    if self.check_dmi_params(40, len(self.dmi) - 1, 'positive'):
-                        r_ = self.get_next_resistance(kline)
+            if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide or self.adx_trade:
+                if rsi_['rsi'] < self.rsi_item_guide['rsi'] or self.adx_trade:
+                    marker_dmi = self.model_tools.get_dmi_marker_by_date(kline[6])
+                    ema_cross = self.model_tools.get_ema_cross_after_by_date(kline[6])
 
-                        sl = round(r_ if r_ is not None else float(kline[4]) * 1.005, 2)
-                        tp = (1 - abs((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
+                    if marker_dmi is None or ema_cross is None:
+                        return
+
+                    after_marker_dmi = self.dmi_markers[
+                        self.dmi_markers.index(marker_dmi) - 1 if marker_dmi is not None and self.dmi_markers.index(
+                            marker_dmi) - 1 is not None else 0]
+
+                    if marker_dmi is not None and after_marker_dmi is not None and marker_dmi['DI']['date'] - \
+                            after_marker_dmi['DI']['date'] <= 300000 * 50:
+
+                        kline_m = self.get_kline_liquidate_marker(marker_dmi['DI']['date'], self.dmi_markers[
+                                                                                                self.dmi_markers.index(
+                                                                                                    marker_dmi) - 1][
+                                                                                                'DI'][
+                                                                                                'date'] or 300000 * 10 if
+                        marker_dmi['ADX'] is None else marker_dmi['ADX']['date'], marker_dmi['DI']['type'])
+                        kline_am = self.get_kline_liquidate_marker(after_marker_dmi['DI']['date'], self.dmi_markers[
+                                                                                                       self.dmi_markers.index(
+                                                                                                           marker_dmi) - 1][
+                                                                                                       'DI'][
+                                                                                                       'date'] or 300000 * 10 if
+                        after_marker_dmi['ADX'] is None else after_marker_dmi['ADX']['date'],
+                                                                   after_marker_dmi['DI']['type'])
+
+                        if self.check_dmi_params(40, self.klines.index(kline) - 29, 'positive') and self.verify_distance_between_ema(1.002,
+                                                                                                              0.998,
+                                                                                                              kline[
+                                                                                                                  6],
+                                                                                                              1) and (
+                                False if marker_dmi['DI']['value'] >= 55 else (
+                                        marker_dmi['DI']['value'] < after_marker_dmi['DI']['value'] and float(
+                                    kline_m[4]) > float(kline_am[4]))) and marker_dmi['DI']['type'] == \
+                                after_marker_dmi['DI']['type']:
+                            r_ = self.get_next_resistance(kline, [1.030, 1.025])
+
+                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.025, 2)
+                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 1.5)) * float(kline[4])
+                            tp = round(tp, 2)
+
+                            self.ex_trade(float(kline[4]), tp, sl, 'SELL', 'SHORT', self.usd_test,
+                                                kline[6])
+                        elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                            self.dmi_item_guide = dmi_
+                            self.adx_trade = True
+                        elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                            'positive'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross[
+                            'type'] == 1:
+                            s_ = self.get_next_support(kline, [0.970, 0.975])
+
+                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.970, 2)
+                            tp = (1 + ((1 - (sl / float(kline[4]))) * 1)) * float(kline[4])
+                            tp = round(tp, 2)
+
+                            self.ex_trade(float(kline[4]), tp, sl, 'BUY', 'LONG', self.usd_test,
+                                          kline[6], 'ADX')
+                            self.adx_trade = False
+                        else:
+                            self.rsi_type = None
+                            self.rsi_item_guide = None
+                            self.adx_trade = False
+                    elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                        self.dmi_item_guide = dmi_
+                        self.adx_trade = True
+                    elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                        'positive'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross[
+                        'type'] == 1:
+                        s_ = self.get_next_support(kline, [0.970, 0.975])
+
+                        sl = round(s_ if s_ is not None else float(kline[4]) * 0.970, 2)
+                        tp = (1 + ((1 - (sl / float(kline[4]))) * 1)) * float(kline[4])
                         tp = round(tp, 2)
 
-                        self.ex_trade(tp, sl, 'BUY', 'SHORT', round(self.usd_test / self.last_close_price, 5))
+                        self.ex_trade(float(kline[4]), tp, sl, 'BUY', 'LONG', self.usd_test,
+                                      kline[6], 'ADX')
+                        self.adx_trade = False
+                    else:
+                        self.rsi_type = None
+                        self.rsi_item_guide = None
+                        self.adx_trade = False
                 else:
                     self.rsi_item_guide = rsi_
                     return
         elif self.rsi_type == 0:
-            if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide:
-                if rsi_['rsi'] > self.rsi_item_guide['rsi']:
-                    if self.check_dmi_params(40, len(self.dmi) - 1, 'negative'):
-                        s_ = self.get_next_support(kline)
+            if self.rsi[self.rsi.index(rsi_) - 1] == self.rsi_item_guide or self.adx_trade:
+                if rsi_['rsi'] > self.rsi_item_guide['rsi'] or self.adx_trade:
+                    marker_dmi = self.model_tools.get_dmi_marker_by_date(kline[6])
+                    ema_cross = self.model_tools.get_ema_cross_after_by_date(kline[6])
 
-                        sl = round(s_ if s_ is not None else float(kline[4]) * 0.995, 2)
-                        tp = (1 + ((1 - (sl / float(kline[4]))) * 2)) * float(kline[4])
+                    if marker_dmi is None or ema_cross is None:
+                        return
+
+                    after_marker_dmi = self.dmi_markers[
+                        self.dmi_markers.index(marker_dmi) - 1 if marker_dmi is not None and self.dmi_markers.index(
+                            marker_dmi) - 1 is not None else 0]
+
+                    if marker_dmi is not None and after_marker_dmi is not None and marker_dmi['DI']['date'] - \
+                            after_marker_dmi['DI']['date'] <= 300000 * 50:
+
+                        kline_m = self.get_kline_liquidate_marker(marker_dmi['DI']['date'], self.dmi_markers[
+                                                                                                self.dmi_markers.index(
+                                                                                                    marker_dmi) - 1][
+                                                                                                'DI'][
+                                                                                                'date'] or 300000 * 10 if
+                        marker_dmi['ADX'] is None else marker_dmi['ADX']['date'], marker_dmi['DI']['type'])
+                        kline_am = self.get_kline_liquidate_marker(after_marker_dmi['DI']['date'], self.dmi_markers[
+                                                                                                       self.dmi_markers.index(
+                                                                                                           marker_dmi) - 1][
+                                                                                                       'DI'][
+                                                                                                       'date'] or 300000 * 10 if
+                        after_marker_dmi['ADX'] is None else after_marker_dmi['ADX']['date'],
+                                                                   after_marker_dmi['DI']['type'])
+
+                        if self.check_dmi_params(40, self.klines.index(kline) - 29, 'negative') and self.verify_distance_between_ema(1.002,
+                                                                                                              0.998,
+                                                                                                              kline[
+                                                                                                                  6],
+                                                                                                              0) and self.verify_distance_between_ema(
+                            1.002, 0.998, kline[6], 1) and (False if marker_dmi['DI']['value'] >= 55 else (
+                                marker_dmi['DI']['value'] < after_marker_dmi['DI']['value'] and float(
+                            kline_m[4]) > float(kline_am[4]))) and marker_dmi['DI']['type'] == \
+                                after_marker_dmi['DI']['type']:
+                            s_ = self.get_next_support(kline, [0.970, 0.975])
+
+                            sl = round(s_ if s_ is not None else float(kline[4]) * 0.975, 2)
+                            tp = (1 + ((1 - (sl / float(kline[4]))) * 1.5)) * float(kline[4])
+                            tp = round(tp, 2)
+
+                            self.ex_trade(float(kline[4]), tp, sl, 'BUY', 'LONG', self.usd_test,
+                                          kline[6])
+                        elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                            self.dmi_item_guide = dmi_
+                            self.adx_trade = True
+                        elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                            'negative'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross[
+                            'type'] == 0:
+                            r_ = self.get_next_resistance(kline, [1.030, 1.025])
+
+                            sl = round(r_ if r_ is not None else float(kline[4]) * 1.025, 2)
+                            tp = (1 - abs((1 - (sl / float(kline[4]))) * 1)) * float(kline[4])
+                            tp = round(tp, 2)
+
+                            self.ex_trade(float(kline[4]), tp, sl, 'SELL', 'SHORT', self.usd_test,
+                                          kline[6], 'ADX')
+
+                            self.adx_trade = False
+                        else:
+                            self.rsi_type = None
+                            self.rsi_item_guide = None
+                            self.adx_trade = False
+                    elif dmi_['ADX'] > self.dmi_item_guide['ADX']:
+                        self.dmi_item_guide = dmi_
+                        self.adx_trade = True
+                    elif self.dmi_item_guide['ADX'] >= 55.00 and marker_dmi['DI']['value'] >= 50 and dmi_['DI'][
+                        'negative'] < 45 and kline[6] - ema_cross['data'][0]['date'] >= 300000 * 100 and ema_cross[
+                        'type'] == 0:
+                        r_ = self.get_next_resistance(kline, [1.030, 1.025])
+
+                        sl = round(r_ if r_ is not None else float(kline[4]) * 1.025, 2)
+                        tp = (1 - abs((1 - (sl / float(kline[4]))) * 1)) * float(kline[4])
                         tp = round(tp, 2)
 
-                        self.ex_trade(tp, sl, 'BUY', 'LONG', round(self.usd_test / self.last_close_price, 5))
+                        self.ex_trade(float(kline[4]), tp, sl, 'SELL', 'SHORT', self.usd_test,
+                                      kline[6], 'ADX')
+                        self.adx_trade = False
+                    else:
+                        self.rsi_type = None
+                        self.rsi_item_guide = None
+                        self.adx_trade = False
                 else:
                     self.rsi_item_guide = rsi_
                     return
@@ -894,6 +853,20 @@ class BotTrading:
                 self.trades_history.append(_tr)
                 self.trade_in_ex = False
                 self.trade_data = None
+            elif close <= _tr['sl'] or low <= _tr['sl']:
+                pnl = float(kline[4]) / _tr['entry']
+
+                self.patrimony += (_tr['al'] * pnl - _tr['al'])
+
+                pnl = (1 - (self.patrimony / _tr['init_patrimony'])) * -1
+
+                _tr['pnl'] = pnl
+                _tr['final_patrimony'] = self.patrimony
+                _tr['finish_date'] = kline[6]
+                self.losses += 1
+                self.trades_history.append(_tr)
+                self.trade_in_ex = False
+                self.trade_data = None
             elif _ema_cross['type'] == 0 if _tr['tt'] == 'ADX' else close <= _tr['sl'] or low <= _tr['sl']:
                 pnl = float(kline[4]) / _tr['entry']
 
@@ -919,7 +892,7 @@ class BotTrading:
 
                 ###################################################
 
-                diff_tp_high = high / _tr['tp']
+                diff_tp_high = round(high / _tr['tp'], 3)
 
                 if diff_close / _tr['amount'] >= 0.99000:
 
@@ -947,7 +920,7 @@ class BotTrading:
                     self.trade_in_ex = False
                     self.trade_data = None
 
-                """elif diff_tp_high > 0.996:
+                elif diff_tp_high >= 0.994:
 
                     diff_tp_high = high / _tr['entry']
 
@@ -960,7 +933,7 @@ class BotTrading:
                     self.won += 1
                     self.trades_history.append(_tr)
                     self.trade_in_ex = False
-                    self.trade_data = None"""
+                    self.trade_data = None
 
         elif _tr['type'] == 'SHORT':
             if low <= _tr['tp'] or _tr['tp'] >= close:
@@ -974,6 +947,20 @@ class BotTrading:
                 _tr['final_patrimony'] = self.patrimony
                 _tr['finish_date'] = kline[6]
                 self.won += 1
+                self.trades_history.append(_tr)
+                self.trade_in_ex = False
+                self.trade_data = None
+            elif close >= _tr['sl'] or low >= _tr['sl']:
+                pnl = 1 + (1 - (float(kline[4]) / _tr['entry']))
+
+                self.patrimony += (_tr['al'] * pnl - _tr['al'])
+
+                pnl = (1 - (self.patrimony / _tr['init_patrimony'])) * -1
+
+                _tr['pnl'] = pnl
+                _tr['final_patrimony'] = self.patrimony
+                _tr['finish_date'] = kline[6]
+                self.losses += 1
                 self.trades_history.append(_tr)
                 self.trade_in_ex = False
                 self.trade_data = None
@@ -1002,7 +989,7 @@ class BotTrading:
 
                 ####################################################
 
-                diff_tp_low = low / _tr['tp']
+                diff_tp_low = round(low / _tr['tp'], 3)
 
                 if diff_close / _tr['amount'] >= 0.99000:
 
@@ -1030,9 +1017,9 @@ class BotTrading:
                     self.trade_in_ex = False
                     self.trade_data = None
 
-                """elif diff_tp_low < 1.004:
+                elif diff_tp_low <= 1.006:
 
-                    diff_tp_low = 1 + (1 - (high / _tr['entry']))
+                    diff_tp_low = 1 + (1 - (low / _tr['entry']))
 
                     self.patrimony += ((_tr['al'] * diff_tp_low - _tr['al']) * -1) * -1
                     pnl = (1 - (self.patrimony / _tr['init_patrimony'])) * -1
@@ -1043,7 +1030,7 @@ class BotTrading:
                     self.won += 1
                     self.trades_history.append(_tr)
                     self.trade_in_ex = False
-                    self.trade_data = None"""
+                    self.trade_data = None
 
     def check_ema_type(self, item1, item2):
         value1, value2 = item1['value'], item2['value']
@@ -1099,33 +1086,103 @@ class BotTrading:
 
         return resistance
 
-    def ex_trade(self, tp, sl, side, positionSide, quantity):
-        limit_order_long = self.binance_client.futures_create_order(
-            symbol=self.currency,
-            side=side,
-            positionSide=positionSide,
-            type='MARKET',
-            quantity=quantity,
-            timeInForce='GTC'
-        )
+    def get_users_(self):
+        db_ = mongo_db.users
 
-        sell_gain_market_long = self.binance_client.futures_create_order(
-            symbol=self.currency,
-            side='SELL',
-            type='TAKE_PROFIT_MARKET',
-            positionSide=positionSide,
-            quantity=quantity,
-            stopPrice=tp
-        )
+        res = db_.find({'active': True})
 
-        sell_stop_market_short = self.binance_client.futures_create_order(
-            symbol=self.currency,
-            side='SELL',
-            type='STOP_MARKET',
-            positionSide=positionSide,
-            quantity=quantity,
-            stopPrice=sl
-        )
+        clients = []
+
+        for i in res:
+            _uk = i['user_key']
+            _sk = i['secret_key']
+            _cantity = i['cantity']
+            _leverage = i['leverage']
+
+            if len(_uk) == 0 and len(_sk) == 0 and not('BTCUSDT' in i['pairs'] or 'btcusdt' in i['pairs']):
+                continue
+
+            _uk, _sk = mongo_db.decrypt_api_keys(_uk, _sk)
+
+            clients.append([str(i['_id']), Client(_uk, _sk), _cantity, _leverage])
+
+        return clients
+
+    def ex_trade(self, entry, tp, sl, side, positionSide, quantity, date_, t='DMI'):
+
+        clients = self.get_users_()
+
+        trades = {}
+
+        for i in clients:
+
+            i[1].futures_change_leverage(symbol=self.currency, leverage=i[3])
+
+            order_amount = round((i[2] * i[3] / self.price), self.symbol_n_precision)
+
+            order = i[1].futures_create_order(
+                symbol=self.currency,
+                side=side,
+                positionSide=positionSide,
+                type='MARKET',
+                dualSidePosition=False,
+                quantity=order_amount
+            )
+
+            if positionSide == 'LONG':
+                side = 'SELL'
+            else:
+                side = 'BUY'
+
+            take_profit_amount = round((tp / self.price) * order_amount, self.symbol_n_precision) if positionSide == 'LONG' else round((1+1-(tp / self.price)) * order_amount, self.symbol_n_precision)
+            stop_loss_amount = round((sl / self.price) * order_amount, self.symbol_n_precision) if positionSide == 'LONG' else round((1+1-(sl / self.price)) * order_amount, self.symbol_n_precision)
+            take_profit = i[1].futures_create_order(
+                symbol=self.currency,
+                side=side,
+                type='TAKE_PROFIT_MARKET',
+                positionSide=positionSide,
+                stopPrice=tp,
+                timestamp=int(time.time() * 1000),
+                quantity=take_profit_amount,
+                closePosition=True,
+                workingType='MARK_PRICE',
+                timeInForce='GTE_GTC',
+                priceProtect=True
+            )
+
+            stop_loss = i[1].futures_create_order(
+                symbol=self.currency,
+                side=side,
+                type='STOP_MARKET',
+                positionSide=positionSide,
+                stopPrice=sl,
+                timestamp=int(time.time() * 1000),
+                workingType='MARK_PRICE',
+                timeInForce='GTE_GTC',
+                quantity=stop_loss_amount,
+                closePosition=True,
+                priceProtect=True
+            )
+
+            trades[i[0]] = {
+                'entry': self.price,
+                'order': order,
+                'tp': take_profit,
+                'tp_price': tp,
+                'sl': stop_loss,
+                'sl_price': sl,
+                'date': date_,
+                'type': t,
+                'positionSide': positionSide,
+                'client': i[1],
+                'amount': order_amount
+            }
+
+        self.trade_data = trades
+
+        mongo_db.add_trades(trades)
+
+        self.trade_in_ex = True
 
     async def config_BM(self):
         self.client_socket = await AsyncClient.create()
@@ -1136,15 +1193,18 @@ class BotTrading:
         async with ts as tscm:
             while True:
                 res = await tscm.recv()
+                self.price = float(res['k']['c'])
+                print(res)
                 if res['k']['x']:
                     self.add_kline(res['k']['T'])
+                    print('add_kline')
+                    self.run_strategy()
 
     async def close_BM(self):
         await self.client_socket.close_connection()
 
     def add_kline(self, date_end: int):
-        self.model_tools.add_kline(date_end)
-        self.reset_vars()
+        self.put_end_day(date_end)
 
     def view_chart(self, trade_index, c_a, c_b):
 
@@ -1218,8 +1278,8 @@ class BotTrading:
             mplf.make_addplot((klines_dr['DI-']), panel=2),
             mplf.make_addplot((klines_dr['ADX']), panel=2),
             mplf.make_addplot((klines_dr['Signal']), type='scatter', markersize=200, marker='v'),
-            mplf.make_addplot((klines_dr['First EMA'])),
-            mplf.make_addplot((klines_dr['Second EMA']))
+            mplf.make_addplot((klines_dr['First EMA']), color='orange'),
+            mplf.make_addplot((klines_dr['Second EMA']), color='blue')
         ]
         mplf.plot(klines_dr, type='candle', style='yahoo', figscale=1.2, addplot=apds)
 
@@ -1262,8 +1322,9 @@ class BotTrading:
 if __name__ == '__main__':
     data = []
 
-    for i in range(0, 12):
+    r = 12
 
+    for i in range(r):
         date = datetime.datetime.now()
         end_day = (date.timestamp() * 1000) - (86400000 * (i * 30))
         start_day = end_day - (86400000 * 30)
@@ -1271,7 +1332,8 @@ if __name__ == '__main__':
         user_key = 'dIXuGb6b1CFjGb6nqn7Vyav7cKm0JwVSv3al62rBruM82Xmsjq4t4tMcNbFoYFsr'
         secret_key = 'aNPDlOhEzk9WLKaLxnkFOTQT6BQ4p7ttXDzSlWK25drrMFY2pWHXszNLtQmwvHSq'
 
-        bot = BotTrading('ETHBUSD', int(start_day), int(end_day), Client.KLINE_INTERVAL_5MINUTE, 3, 1000, 10, user_key, secret_key, 99, 200)
+        bot = BotTrading('BTCBUSD', int(start_day), int(end_day), Client.KLINE_INTERVAL_5MINUTE, 3, 1000, 10, user_key,
+                         secret_key, 99, 200)
         bot.run_strategy_test()
 
         d = {
@@ -1284,7 +1346,7 @@ if __name__ == '__main__':
 
         data.append(d)
 
-        print(f"{i+1}/12")
+        print(f"{i+1}/{r}")
 
     print(data)
 
@@ -1300,7 +1362,7 @@ if __name__ == '__main__':
         won_trades_total += i['won_trades']
         losses_trades_total += i['losses_trades']
         final_patrimony += (i['final_capital'] - i['init_inv'])
-        
+
         if data.index(i) == len(data) - 1:
             trades_ratio = won_trades_total / (won_trades_total + losses_trades_total)
             balance_ratio = final_patrimony / init_inv
