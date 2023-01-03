@@ -3,7 +3,9 @@ import datetime
 import time
 
 import numpy as np
-import talib as ta
+import pandas
+from ta.momentum import rsi as _rsi
+from ta.trend import sma_indicator as _sma_indicator
 
 import requests
 
@@ -41,7 +43,7 @@ class ModelTools:
 
         self.sentiment = self.getSentiment()
 
-        self.bb = self.getBB(self.klines)
+        self.bb = None
 
         self.rsi = self.getRSI(self.klines)
         self.rsiCrosses = self.getRSICrosses(self.rsi)
@@ -95,7 +97,7 @@ class ModelTools:
 
         self.dmi = self.getDMI(self.klines, 14)
 
-        self.bb = self.getBB(self.klines)
+        self.bb = None
 
         self.sentiment = self.getSentiment()
 
@@ -2318,16 +2320,17 @@ class ModelTools:
             return self.bb[2][index]
 
     def getBB(self, entry: list):
-
-        close = self.getCloseData(entry)
-        bb = ta.BBANDS(np.array(close), timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
-        return bb
+        pass
+        """close = self.getCloseData(entry)
+        bb = ta.bbands(np.array(close), length=20, nbdevup=2, nbdevdn=2, mamode=0)
+        return bb"""
 
     def getRSI(self, entry: list):
 
-        close = self.getCloseData(entry)
-        rsi = ta.RSI(np.array(close), timeperiod=14)
-        ma = ta.MA(rsi, timeperiod=20)
+        closes = self.getCloseData(self.klines)
+
+        rsi = _rsi(pandas.Series(closes), window=14)
+        ma = _sma_indicator(rsi, window=20)
         values = []
         for i in range(0, len(rsi)):
             if str(rsi[i]) != 'nan':

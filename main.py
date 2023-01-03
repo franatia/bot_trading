@@ -10,11 +10,12 @@ from MongoDB import MongoDB
 from cryptography.fernet import Fernet
 from controllers.users import validate_name, validate_email, validate_password, validate_keys, validate_profile_photo
 from flask_cors import CORS, cross_origin
+import os
 
 app = Flask(__name__)
 cors = CORS(app)
 app.config['CORS_HEADERS'] = 'Content-Type'
-PORT = 8000
+PORT = os.environ['PORT']
 
 date = datetime.datetime.now()
 end_day = (date.timestamp() * 1000)
