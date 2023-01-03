@@ -1,12 +1,9 @@
 import asyncio
 import datetime
-from threading import Thread, Event
 import time
 
-import numpy
 import numpy as np
 import talib as ta
-from talib import MA_Type
 
 import requests
 
