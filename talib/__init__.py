@@ -90,7 +90,7 @@ else:
     _wrapper = lambda x: x
 
 
-from ._ta_lib import (
+from talib._ta_lib import (
     _ta_initialize, _ta_shutdown, MA_Type, __ta_version__,
     _ta_set_unstable_period as set_unstable_period,
     _ta_get_unstable_period as get_unstable_period,
