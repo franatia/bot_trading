@@ -234,6 +234,3 @@ def run_ws():
     if _run_ws:
         return jsonify({'msg': 'Running'})
     config_bot()
-
-if __name__ == '__main__':
-    serve(app, port=PORT, host='0.0.0.0', threads=2)
