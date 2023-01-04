@@ -236,4 +236,4 @@ def run_ws():
     config_bot()
 
 if __name__ == '__main__':
-    serve(app, host='0.0.0.0', port=PORT, threads=2, url_prefix='/api')
+    app.run(host='0.0.0.0', port=PORT)
