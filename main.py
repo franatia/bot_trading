@@ -19,7 +19,7 @@ PORT = os.environ['PORT']
 
 date = datetime.datetime.now()
 end_day = (date.timestamp() * 1000)
-start_day = end_day - (86400000 * 10)
+start_day = end_day - (86400000 * 30)
 
 user_key = 'dIXuGb6b1CFjGb6nqn7Vyav7cKm0JwVSv3al62rBruM82Xmsjq4t4tMcNbFoYFsr'
 secret_key = 'aNPDlOhEzk9WLKaLxnkFOTQT6BQ4p7ttXDzSlWK25drrMFY2pWHXszNLtQmwvHSq'
@@ -31,8 +31,11 @@ MONGO_STRING = 'mongodb+srv://admin_1:aa74b6474add49868a695bcc3155e426@cluster0.
 mongo_db = MongoDB(MONGO_STRING)
 
 FERNET_KEY = b'oHUYqtRfCEdDG7S5OSN-KWt32mj9WYtXtUadLGiKuPA='
+_run_ws = False
 
 def config_bot():
+    global _run_ws
+    _run_ws = True
     botTrading_btc.run_strategy()
     asyncio.run(botTrading_btc.config_BM())
 
@@ -228,6 +231,8 @@ def run_test_trade():
 @cross_origin()
 @app.route('/run_ws', methods=['GET'])
 def run_ws():
+    if _run_ws:
+        return jsonify({'msg': 'Running'})
     config_bot()
 
 if __name__ == '__main__':

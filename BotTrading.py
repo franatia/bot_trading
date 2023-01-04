@@ -1194,7 +1194,6 @@ class BotTrading(BotData):
             while True:
                 res = await tscm.recv()
                 self.price = float(res['k']['c'])
-                print(res)
                 if res['k']['x']:
                     self.add_kline(res['k']['T'])
                     print('add_kline')
@@ -1322,9 +1321,9 @@ class BotTrading(BotData):
 if __name__ == '__main__':
     data = []
 
-    r = 12
+    r = 1
 
-    for i in range(r):
+    for i in range(0, r):
         date = datetime.datetime.now()
         end_day = (date.timestamp() * 1000) - (86400000 * (i * 30))
         start_day = end_day - (86400000 * 30)
